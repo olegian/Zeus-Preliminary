@@ -10,24 +10,11 @@ import torch.distributed as dist
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
-import torch.multiprocessing as mp
-from torch.utils.data.dataloader import DataLoader
 from torch.distributed.fsdp import FullyShardedDataParallel
 from zeus.monitor import ZeusMonitor
 from zeus.utils.lr_scaler import LinearScaler
 
-WORLD_SIZE = int(os.environ.get("WORLD_SIZE", 2))
-
-def setup(rank, world_size):
-    os.environ["MASTER_ADDR"] = "localhost"
-    os.environ["MASTER_PORT"] = "29500"
-    os.environ["RANK"] = str(rank)
-    dist.init_process_group("nccl", rank=rank, world_size=world_size)
-    torch.cuda.set_device(rank)
-
-def cleanup():
-    dist.destroy_process_group()
-
+WORLD_SIZE = int(os.environ.get("WORLD_SIZE", 1))
 
 class Net(nn.Module):
     def __init__(self):
@@ -48,7 +35,7 @@ class Net(nn.Module):
         return F.log_softmax(x, dim=1)
 
 
-def train(model: nn.Module, device, train_loader: DataLoader, optimizer: optim.Optimizer, epoch, writer, log_interval):
+def train(args, model: nn.Module, device, train_loader, optimizer: optim.Optimizer, epoch, writer):
     model.train()
     for batch_idx, (data, target) in enumerate(train_loader):
         data, target = data.to(device), target.to(device)
@@ -58,7 +45,7 @@ def train(model: nn.Module, device, train_loader: DataLoader, optimizer: optim.O
         loss.backward()
         optimizer.step()
 
-        if batch_idx % log_interval == 0:
+        if batch_idx % args.log_interval == 0:
             print(
                 "Train Epoch: {} [{}/{} ({:.0f}%)]\tloss={:.4f}".format(
                     epoch,
@@ -72,7 +59,7 @@ def train(model: nn.Module, device, train_loader: DataLoader, optimizer: optim.O
             writer.add_scalar("loss", loss.item(), niter)
 
 
-def test(model, device, test_loader, writer, epoch):
+def test(args, model, device, test_loader, writer, epoch):
     model.eval()
     test_loss = 0
     correct = 0
@@ -101,30 +88,6 @@ def should_distribute():
 
 def is_distributed():
     return dist.is_available() and dist.is_initialized()
-
-def worker(rank, world_size, model: nn.Module, train_loader, test_loader, optimizer, epochs, writer):
-    """Runs a single ranks workload"""
-    setup(rank, world_size)
-
-    device = f"cuda:{rank}"
-    model = model.to(device)
-
-    ########################## Zeus ##########################
-    monitor = ZeusMonitor(gpu_indices=[rank])
-    for epoch in range(1, epochs + 1):
-        monitor.begin_window("training")
-        train(model, device, train_loader, optimizer, epoch, writer, 10)
-        train_measure = monitor.end_window("training")
-
-        monitor.begin_window("validation")
-        acc = test(model, device, test_loader, writer, epoch)
-        val_measure = monitor.end_window("validation")
-
-        print(f"Zeus Measurements: train={train_measure.total_energy}, val={val_measure.total_energy}")
-    ##########################################################
-
-
-    cleanup()
 
 def main():
     # Training settings
@@ -187,7 +150,7 @@ def main():
             type=str,
             help="Distributed backend",
             choices=[dist.Backend.GLOO, dist.Backend.NCCL, dist.Backend.MPI],
-            default=dist.Backend.NCCL,
+            default=dist.Backend.GLOO,
         )
     args = parser.parse_args()
     use_cuda = not args.no_cuda and torch.cuda.is_available()
@@ -198,15 +161,18 @@ def main():
 
     torch.manual_seed(args.seed)
 
+    device = torch.device("cuda" if use_cuda else "cpu")
+
     if should_distribute():
         print("Using distributed PyTorch with {} backend".format(args.backend))
-        # dist.init_process_group(backend=args.backend)
+        dist.init_process_group(backend=args.backend)
 
     kwargs = {"num_workers": 1, "pin_memory": True} if use_cuda else {}
 
     ########################## Zeus ##########################
-    # Fetch the batch size from the BSO server. (Oleg: this doesn't happen anymore,
-    # i've disabled it. It used to be a Zeus optimzation feature to find this batch_size)
+    monitor = ZeusMonitor(gpu_indices=[0])
+
+    # Fetch the batch size from the BSO server.
     batch_size = 32
     print("Chosen batch_size:", batch_size)
     # Scale the learning rate accordingly.
@@ -242,7 +208,7 @@ def main():
     )
 
     model = Net()
-    # model = FullyShardedDataParallel(model).to(device)
+    model = FullyShardedDataParallel(model).to(device)
 
     if is_distributed():
         Distributor = (
@@ -254,12 +220,17 @@ def main():
 
     optimizer = optim.SGD(model.parameters(), lr=args.lr, momentum=args.momentum)
     
-    mp.spawn(
-        worker,
-        args=(WORLD_SIZE, model, train_loader, test_loader, optimizer, args.epochs, writer),
-        nprocs=WORLD_SIZE,
-        join=True,
-    )
+    ########################## Zeus ##########################
+
+    for epoch in range(1, args.epochs + 1):
+        monitor.begin_window("training")
+        train(args, model, device, train_loader, optimizer, epoch, writer)
+        acc = test(args, model, device, test_loader, writer, epoch)
+        measurement = monitor.end_window("training")
+
+        print("Zeus Measurement:", measurement)
+
+    ##########################################################
         
     if args.save_model:
         torch.save(model.state_dict(), "mnist_cnn.pt")
