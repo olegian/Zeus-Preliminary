@@ -5,29 +5,26 @@ import os
 
 import numpy as np
 from transformers import AutoModelForCausalLM, AutoTokenizer
-from tensorboardX import SummaryWriter
 from datasets import load_dataset
 from datasets.arrow_dataset import Dataset
-from torchvision import transforms
 import torch
 import torch.distributed as dist
 import torch.nn as nn
-import torch.nn.functional as F
 import torch.optim as optim
 import torch.distributed.fsdp as fsdp
 from torch.distributed.fsdp import FullyShardedDataParallel
 from zeus.monitor import ZeusMonitor
 from zeus.utils.lr_scaler import LinearScaler
-from zeus.device import get_gpus
+import nvtx
 
-WORLD_SIZE = int(os.environ.get("WORLD_SIZE", 2))
+# TO RUN: 
+# srun --gpus-per-node=2 uv run torchrun --nproc_per_node=2 test_qwen.py
 
-# TO RUN: srun --gpus-per-node=2 uv run torchrun --nproc_per_node=2 test_qwen.py
-
-def train(args, model: nn.Module, device, ds, optimizer: optim.Optimizer, epoch, batch_size, writer, monitor: ZeusMonitor):
+def train(args, model: FullyShardedDataParallel, device, ds, optimizer: optim.Optimizer, epoch, batch_size, monitor: ZeusMonitor):
     model.train()
     energy_measurements = []
-    logging_steps = 5 # if you want to quick exit
+    n = 0
+    print("warmup")
     for start_idx in range(0, len(ds), batch_size):
         batch = ds[start_idx : start_idx + batch_size]
         data = batch["input_ids"].to(device)
@@ -38,12 +35,13 @@ def train(args, model: nn.Module, device, ds, optimizer: optim.Optimizer, epoch,
         monitor.begin_window("training")
         # output = model(data)
         output = model(input_ids=data, attention_mask=mask, labels=data)
-        train_mes = monitor.end_window("training")
-        energy_measurements.append(train_mes.total_energy)
         # loss = F.nll_loss(output, target)
         loss = output.loss
         loss.backward()
-        optimizer.step()
+        # optimizer.step()
+
+        train_mes = monitor.end_window("training")
+        energy_measurements.append(train_mes.total_energy)
 
         if start_idx % (args.log_interval * batch_size) == 0:
             print(
@@ -55,18 +53,54 @@ def train(args, model: nn.Module, device, ds, optimizer: optim.Optimizer, epoch,
                     loss.item(),
                 )
             )
-            niter = epoch * (len(ds) // batch_size) + (start_idx // batch_size)
-            writer.add_scalar("loss", loss.item(), niter)
-            if logging_steps > 0:
-                logging_steps -= 1
-            else:
+        
+        if n == 5:
+            break
+
+        n += 1
+
+    print("measuring...")
+    with nvtx.annotate("measured", color='blue'):
+        energy_measurements = []
+        n = 0
+        for start_idx in range(0, len(ds), batch_size):
+            batch = ds[start_idx : start_idx + batch_size]
+            data = batch["input_ids"].to(device)
+            mask = batch["attention_mask"].to(device)
+            # data, target = data.to(device), target.to(device)
+            optimizer.zero_grad()
+
+            with model.no_sync():
+                with nvtx.annotate(f"energy-{n}", color='red'):
+                    monitor.begin_window("training")
+                    # output = model(data)
+                    output = model(input_ids=data, attention_mask=mask, labels=data)
+                    # loss = F.nll_loss(output, target)
+                    loss = output.loss
+                    loss.backward()
+                    # optimizer.step()
+
+                    train_mes = monitor.end_window("training")
+                    energy_measurements.append(train_mes.total_energy)
+
+            if start_idx % (args.log_interval * batch_size) == 0:
+                print(
+                    "Train Epoch: {} [{}/{} ({:.0f}%)]\tloss={:.4f}".format(
+                        epoch,
+                        start_idx,
+                        len(ds),
+                        100.0 * start_idx / len(ds),
+                        loss.item(),
+                    )
+                )
+            
+            if n == 5:
                 break
+
+            n += 1
         
     local_rank = int(os.environ['LOCAL_RANK'])
     print(f"{local_rank}e{epoch}|> Avg energy consumption per step: {np.array(energy_measurements).mean(-1)}")
-
-def should_distribute():
-    return dist.is_available() and WORLD_SIZE > 1
 
 def is_distributed():
     return dist.is_available() and dist.is_initialized()
@@ -139,7 +173,6 @@ def main():
     if use_cuda:
         print("Using CUDA")
 
-    writer = SummaryWriter(args.dir)
 
     torch.manual_seed(args.seed)
 
@@ -192,14 +225,14 @@ def main():
     test_dataset.set_format(type="torch", columns=["input_ids", "attention_mask"])
     
     # exit for now
-    model = FullyShardedDataParallel(model, sharding_strategy=fsdp.ShardingStrategy.FULL_SHARD, device_id=local_rank)
+    model = FullyShardedDataParallel(model, sharding_strategy=fsdp.ShardingStrategy.NO_SHARD, device_id=local_rank)
 
     optimizer = optim.SGD(model.parameters(), lr=args.lr, momentum=args.momentum)
 
     ########################## Zeus ##########################
     for epoch in range(1, args.epochs + 1):
         # ds = train_dataset.shuffle(seed=args.seed + epoch)
-        train(args, model, device, train_dataset, optimizer, epoch, batch_size, writer, monitor)
+        train(args, model, device, train_dataset, optimizer, epoch, batch_size, monitor)
     ##########################################################
 
     if args.save_model and local_rank == 0:
