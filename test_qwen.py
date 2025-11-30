@@ -24,27 +24,10 @@ WORLD_SIZE = int(os.environ.get("WORLD_SIZE", 2))
 
 # TO RUN: srun --gpus-per-node=2 uv run torchrun --nproc_per_node=2 test_qwen.py
 
-class Net(nn.Module):
-    def __init__(self):
-        super(Net, self).__init__()
-        self.conv1 = nn.Conv2d(1, 20, 5, 1)
-        self.conv2 = nn.Conv2d(20, 50, 5, 1)
-        self.fc1 = nn.Linear(4 * 4 * 50, 500)
-        self.fc2 = nn.Linear(500, 10)
-
-    def forward(self, x):
-        x = F.relu(self.conv1(x))
-        x = F.max_pool2d(x, 2, 2)
-        x = F.relu(self.conv2(x))
-        x = F.max_pool2d(x, 2, 2)
-        x = x.view(-1, 4 * 4 * 50)
-        x = F.relu(self.fc1(x))
-        x = self.fc2(x)
-        return F.log_softmax(x, dim=1)
-
 def train(args, model: nn.Module, device, ds, optimizer: optim.Optimizer, epoch, batch_size, writer, monitor: ZeusMonitor):
     model.train()
     energy_measurements = []
+    logging_steps = 5 # if you want to quick exit
     for start_idx in range(0, len(ds), batch_size):
         batch = ds[start_idx : start_idx + batch_size]
         data = batch["input_ids"].to(device)
@@ -72,39 +55,18 @@ def train(args, model: nn.Module, device, ds, optimizer: optim.Optimizer, epoch,
                     loss.item(),
                 )
             )
-            niter = epoch * (len(ds) // args.batch_size) + (start_idx // args.batch_size)
+            niter = epoch * (len(ds) // batch_size) + (start_idx // batch_size)
             writer.add_scalar("loss", loss.item(), niter)
+            if logging_steps > 0:
+                logging_steps -= 1
+            else:
+                break
         
     local_rank = int(os.environ['LOCAL_RANK'])
     print(f"{local_rank}e{epoch}|> Avg energy consumption per step: {np.array(energy_measurements).mean(-1)}")
 
-
-def test(args, model, device, test_loader, writer, epoch):
-    model.eval()
-    test_loss = 0
-    correct = 0
-    with torch.no_grad():
-        for data, target in test_loader:
-            data, target = data.to(device), target.to(device)
-            output = model(data)
-            test_loss += F.nll_loss(
-                output, target, reduction="sum"
-            ).item()  # sum up batch loss
-            pred = output.max(1, keepdim=True)[
-                1
-            ]  # get the index of the max log-probability
-            correct += pred.eq(target.view_as(pred)).sum().item()
-
-    test_loss /= len(test_loader.dataset)
-    print("\naccuracy={:.4f}\n".format(float(correct) / len(test_loader.dataset)))
-    writer.add_scalar("accuracy", float(correct) / len(test_loader.dataset), epoch)
-
-    return float(correct) / len(test_loader.dataset)
-
-
 def should_distribute():
     return dist.is_available() and WORLD_SIZE > 1
-
 
 def is_distributed():
     return dist.is_available() and dist.is_initialized()
@@ -197,7 +159,7 @@ def main():
     # Fetch the batch size from the BSO server. (Oleg: There used to be more
     # zeus stuff here which used this BSO server to optimize the batch size,
     # i've removed it as it seemed irrelevant).
-    batch_size = 32
+    batch_size = 4
     print("Chosen batch_size:", batch_size)
     # Scale the learning rate accordingly.
     # Default was batch size 64 and learing rate 0.01, and we use the linear
@@ -205,33 +167,6 @@ def main():
     args.lr = LinearScaler(bs=64, lr=0.01).compute_lr(new_bs=batch_size)
     ##########################################################
 
-    # train_loader = torch.utils.data.DataLoader(
-    #     datasets.FashionMNIST(
-    #         "../data",
-    #         train=True,
-    #         download=True,
-    #         transform=transforms.Compose(
-    #             [transforms.ToTensor(), transforms.Normalize((0.1307,), (0.3081,))]
-    #         ),
-    #     ),
-    #     batch_size=batch_size,
-    #     shuffle=True,
-    #     **kwargs,
-    # )
-    # test_loader = torch.utils.data.DataLoader(
-    #     datasets.FashionMNIST(
-    #         "../data",
-    #         train=False,
-    #         transform=transforms.Compose(
-    #             [transforms.ToTensor(), transforms.Normalize((0.1307,), (0.3081,))]
-    #         ),
-    #     ),
-    #     batch_size=args.test_batch_size,
-    #     shuffle=False,
-    #     **kwargs,
-    # )
-
-    # model = Net().to(device)
     model_name = "Qwen/Qwen3-0.6B"
     tokenizer = AutoTokenizer.from_pretrained(model_name)
     model = AutoModelForCausalLM.from_pretrained(model_name)
@@ -240,8 +175,8 @@ def main():
 
     # need simple text dataset instead of image dataset for language model
 
-    train_dataset = load_dataset("wikitext", "wikitext-2-raw-v1", split="train")
-    test_dataset = load_dataset("wikitext", "wikitext-2-raw-v1", split="test")
+    train_dataset = load_dataset("wikitext", "wikitext-2-raw-v1", split="train[:10%]")
+    test_dataset = load_dataset("wikitext", "wikitext-2-raw-v1", split="test[:10%]")
 
     def tokenize_function(examples):
         return tokenizer(examples["text"], truncation=True, max_length=512, padding="max_length")
@@ -257,26 +192,18 @@ def main():
     test_dataset.set_format(type="torch", columns=["input_ids", "attention_mask"])
     
     # exit for now
-    # if is_distributed():
-    # Distributor = (
-    #     # nn.parallel.DistributedDataParallel
-    #     FullyShardedDataParallel
-    #     if use_cuda
-    #     else nn.parallel.DistributedDataParallelCPU
-    # )
     model = FullyShardedDataParallel(model, sharding_strategy=fsdp.ShardingStrategy.FULL_SHARD, device_id=local_rank)
 
     optimizer = optim.SGD(model.parameters(), lr=args.lr, momentum=args.momentum)
-    
+
     ########################## Zeus ##########################
     for epoch in range(1, args.epochs + 1):
         # ds = train_dataset.shuffle(seed=args.seed + epoch)
         train(args, model, device, train_dataset, optimizer, epoch, batch_size, writer, monitor)
-        
     ##########################################################
-        
-    if args.save_model:
-        torch.save(model.state_dict(), "mnist_cnn.pt")
+
+    if args.save_model and local_rank == 0:
+        torch.save(model.state_dict(), "qwen_2.pt")
 
     dist.destroy_process_group()
 
