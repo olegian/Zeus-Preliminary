@@ -14,3 +14,4 @@ wheels/
 # output files
 logs/
 *.nsys-rep
+*.sqlite
