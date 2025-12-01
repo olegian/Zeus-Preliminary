@@ -6,8 +6,10 @@ import os
 import numpy as np
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from datasets import load_dataset
-from datasets.arrow_dataset import Dataset
+from datasets.arrow_dataset import Dataset as HFDataset
+from torch.utils.data.dataset import Dataset
 import torch
+import nvtx
 import torch.distributed as dist
 import torch.nn as nn
 import torch.optim as optim
@@ -16,51 +18,82 @@ from zeus.monitor import ZeusMonitor
 from zeus.utils.lr_scaler import LinearScaler
 from zeus.device import get_gpus
 
-WORLD_SIZE = int(os.environ.get("WORLD_SIZE", 2))
+# WORLD_SIZE = int(os.environ.get("WORLD_SIZE", 2))
 
 # TO RUN: srun --gpus-per-node=2 uv run deepspeed test_qwen_ds.py
 
-def train(args, model: nn.Module, device, ds, optimizer: optim.Optimizer, epoch, batch_size, monitor: ZeusMonitor):
+# TO RUN: srun --gpus-per-node=2 uv run nsys profile -o qwen_ds_2 deepspeed test_qwen_ds.py
+
+def train(args, model: deepspeed.DeepSpeedEngine, ds, optimizer: optim.Optimizer, epoch, batch_size, monitor: ZeusMonitor):
     model.train()
     energy_measurements = []
-    logging_steps = 5 # if you want to quick exit
-    for start_idx in range(0, len(ds), batch_size):
-        batch = ds[start_idx : start_idx + batch_size]
-        data = batch["input_ids"].to(device)
-        mask = batch["attention_mask"].to(device)
-        # data, target = data.to(device), target.to(device)
-        optimizer.zero_grad()
+    n = 0
+    print("warmup")
+    for i, batch in enumerate(ds):
+        data = batch["input_ids"].to(model.device)
+        mask = batch["attention_mask"].to(model.device)
 
         monitor.begin_window("training")
-        # output = model(data)
-        output = model(input_ids=data, attention_mask=mask, labels=data)
+
+        loss = model(input_ids=data, attention_mask=mask, labels=data).loss
+        model.backward(loss)
+        model.step()
+
         train_mes = monitor.end_window("training")
         energy_measurements.append(train_mes.total_energy)
-        # loss = F.nll_loss(output, target)
-        loss = output.loss
-        loss.backward()
-        optimizer.step()
 
-        if start_idx % (args.log_interval * batch_size) == 0:
+        if i % args.log_interval == 0:
             print(
                 "Train Epoch: {} [{}/{} ({:.0f}%)]\tloss={:.4f}".format(
                     epoch,
-                    start_idx,
+                    i,
                     len(ds),
-                    100.0 * start_idx / len(ds),
+                    100.0 * i / len(ds),
                     loss.item(),
                 )
             )
-            if logging_steps > 0:
-                logging_steps -= 1
-            else:
+
+        if n == 5:
+            break
+
+        n += 1
+
+    print("measuring...")
+    with nvtx.annotate("measured", color='blue'):
+        energy_measurements = []
+        n = 0
+        for i, batch in enumerate(ds):
+            data = batch["input_ids"].to(model.device)
+            mask = batch["attention_mask"].to(model.device)
+
+            # with model.no_sync():
+            with nvtx.annotate(f"energy-{n}", color='red'):
+                monitor.begin_window("training")
+                loss = model(input_ids=data, attention_mask=mask, labels=data).loss
+                model.backward(loss)
+                model.step()
+
+                train_mes = monitor.end_window("training")
+                energy_measurements.append(train_mes.total_energy)
+
+            if i % (args.log_interval * batch_size) == 0:
+                print(
+                    "Train Epoch: {} [{}/{} ({:.0f}%)]\tloss={:.4f}".format(
+                        epoch,
+                        i,
+                        len(ds),
+                        100.0 * i / len(ds),
+                        loss.item(),
+                    )
+                )
+            
+            if n == 5:
                 break
+
+            n += 1
         
     local_rank = int(os.environ['LOCAL_RANK'])
     print(f"{local_rank}e{epoch}|> Avg energy consumption per step: {np.array(energy_measurements).mean(-1)}")
-
-def should_distribute():
-    return dist.is_available() and WORLD_SIZE > 1
 
 def is_distributed():
     return dist.is_available() and dist.is_initialized()
@@ -98,7 +131,7 @@ def main():
     parser.add_argument(
         "--log-interval",
         type=int,
-        default=10,
+        default=1,
         metavar="N",
         help="how many batches to wait before logging training status",
     )
@@ -142,14 +175,8 @@ def main():
     torch.manual_seed(args.seed)
 
     local_rank = int(getattr(args, "local_rank", os.environ.get("LOCAL_RANK", "0")))
-    device = torch.device(f"cuda:{local_rank}" if use_cuda else "cpu")
 
-    # if should_distribute():
-    args.backend = dist.Backend.NCCL  # workaround
-    print("Using distributed PyTorch with {} backend".format(args.backend))
-    dist.init_process_group(backend=args.backend)
-
-    kwargs = {"num_workers": 1, "pin_memory": True} if use_cuda else {}
+    deepspeed.init_distributed()
 
     ########################## Zeus ##########################
     monitor = ZeusMonitor(gpu_indices=[local_rank])
@@ -167,14 +194,14 @@ def main():
 
     model_name = "Qwen/Qwen3-0.6B"
     tokenizer = AutoTokenizer.from_pretrained(model_name)
+    tokenizer.pad_token = tokenizer.eos_token
     model = AutoModelForCausalLM.from_pretrained(model_name)
     print("loaded model and tokenizer")
-    # model = FullyShardedDataParallel(model).to(device)
 
     # need simple text dataset instead of image dataset for language model
 
-    train_dataset = load_dataset("wikitext", "wikitext-2-raw-v1", split="train[:10%]")
-    test_dataset = load_dataset("wikitext", "wikitext-2-raw-v1", split="test[:10%]")
+    train_dataset = load_dataset("wikitext", "wikitext-2-raw-v1", split="train[:5%]")
+    test_dataset = load_dataset("wikitext", "wikitext-2-raw-v1", split="test[:5%]")
 
     def tokenize_function(examples):
         return tokenizer(examples["text"], truncation=True, max_length=512, padding="max_length")
@@ -183,19 +210,15 @@ def main():
     test_dataset = test_dataset.map(tokenize_function, batched=True)
     # text, input_ids, attention_mask
 
-    assert isinstance(train_dataset, Dataset)
-    assert isinstance(test_dataset, Dataset)
+    assert isinstance(train_dataset, HFDataset)
+    assert isinstance(test_dataset, HFDataset)
 
     train_dataset.set_format(type="torch", columns=["input_ids", "attention_mask"])
     test_dataset.set_format(type="torch", columns=["input_ids", "attention_mask"])
-    
-    # exit for now
-    # model = FullyShardedDataParallel(model, sharding_strategy=fsdp.ShardingStrategy.FULL_SHARD, device_id=local_rank)
-
-    # optimizer = optim.SGD(model.parameters(), lr=args.lr, momentum=args.momentum)
 
     ds_config = {
-        "train_batch_size": batch_size * WORLD_SIZE,
+        "train_micro_batch_size_per_gpu": batch_size,
+        "gradient_accumulation_steps": 1,
         "optimizer": {
             "type": "SGD",
             "params": {
@@ -208,23 +231,23 @@ def main():
         }
     }
 
-    model, optimizer, _, _ = deepspeed.initialize(
+    model, optimizer, train_loader, _ = deepspeed.initialize(
         args=args,
         model=model,
+        training_data=train_dataset,
         config=ds_config
     )
 
     ########################## Zeus ##########################
     for epoch in range(1, args.epochs + 1):
         # ds = train_dataset.shuffle(seed=args.seed + epoch)
-        train(args, model, device, train_dataset, optimizer, epoch, batch_size, monitor)
+        train(args, model, train_loader, optimizer, epoch, batch_size, monitor)
     ##########################################################
 
     if args.save_model and local_rank == 0:
         torch.save(model.state_dict(), "qwen_ds_2.pt")
 
     dist.destroy_process_group()
-
 
 if __name__ == "__main__":
     main()
