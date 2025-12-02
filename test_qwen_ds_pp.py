@@ -25,27 +25,6 @@ from zeus.device import get_gpus
 
 # TO RUN: srun --gpus-per-node=2 uv run nsys profile -o qwen_ds_2 deepspeed test_qwen_ds.py
 
-class MyDatasetIterator:
-    def __init__(self, ds, model):
-        self.ds = ds
-        self.model = model
-        self.index = 0
-
-    def __iter__(self):
-        return self
-
-    def __next__(self):
-        
-        if self.index < len(self.ds):
-            batch = self.ds[self.index]
-            loss = self.model.train_batch(batch)
-            data = batch["input_ids"].to(self.model.device)
-            mask = batch["attention_mask"].to(self.model.device)
-            self.index += 1
-            return (loss, data, mask)
-        else:
-            raise StopIteration
-
 def train(args, model: deepspeed.PipelineEngine, ds, optimizer: optim.Optimizer, epoch, batch_size, monitor: ZeusMonitor):
     model.train()
     energy_measurements = []
@@ -54,6 +33,7 @@ def train(args, model: deepspeed.PipelineEngine, ds, optimizer: optim.Optimizer,
 
     loss = model.train_batch()
     print("loss:", loss)
+    return
     # loss = model.train_batch(data_iter=train_iter)
     # print("loss:", loss)
     #     loss = model.train_batch(batch)
@@ -229,10 +209,19 @@ def main():
     model = AutoModelForCausalLM.from_pretrained(model_name)
     print("loaded model and tokenizer")
 
+    def dummy_loss_fn(outputs,labels):
+        # outputs is a CausalLMOutputWithPast for some reason
+        if hasattr(outputs, "logits"):
+            logits = outputs.logits
+        else:
+            logits = outputs
+        
+        return nn.CrossEntropyLoss()(logits.view(-1, logits.size(-1)), labels.view(-1))
+
     model = PipelineModule(
         layers=[model],
         num_stages=1,
-        loss_fn=nn.CrossEntropyLoss(),
+        loss_fn=dummy_loss_fn,
         partition_method="parameters",
     )
 
@@ -269,10 +258,26 @@ def main():
         }
     }
 
+    class ProperDataset(Dataset):
+        def __init__(self, hf_dataset):
+            self.hf_dataset = hf_dataset
+
+        def __len__(self):
+            return len(self.hf_dataset)
+
+        def __getitem__(self, idx):
+            item = self.hf_dataset[idx]
+            input_ids = item["input_ids"]
+            attention_mask = item["attention_mask"]
+            labels = input_ids.clone()
+            return (
+                input_ids, labels
+            )
+
     model, optimizer, train_loader, _ = deepspeed.initialize(
         args=args,
         model=model,
-        training_data=train_dataset,
+        training_data=ProperDataset(train_dataset),
         config=ds_config
     )
 
