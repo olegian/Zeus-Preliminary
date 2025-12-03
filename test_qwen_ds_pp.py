@@ -28,86 +28,77 @@ from zeus.device import get_gpus
 def train(args, model: deepspeed.PipelineEngine, ds, optimizer: optim.Optimizer, epoch, batch_size, monitor: ZeusMonitor):
     model.train()
     energy_measurements = []
-    n = 0
+    n = 5
     print("warmup")
 
-    loss = model.train_batch()
-    print("loss:", loss)
-    return
-    # loss = model.train_batch(data_iter=train_iter)
-    # print("loss:", loss)
-    #     loss = model.train_batch(batch)
-    #     data = batch["input_ids"].to(model.device)
-    #     mask = batch["attention_mask"].to(model.device)
+    for _ in range(n):
+        monitor.begin_window("training")
 
-    #     monitor.begin_window("training")
+        loss = model.train_batch()
+        if model.is_last_stage():
+            print(f"loss: {loss}")
 
-    #     loss = model(input_ids=data, attention_mask=mask, labels=data).loss
-        
-    #     model.backward(loss)
-    #     model.step()
-
-    #     train_mes = monitor.end_window("training")
-    #     energy_measurements.append(train_mes.total_energy)
-
-    
-    
-    #     if i % args.log_interval == 0:
-    #         print(
-    #             "Train Epoch: {} [{}/{} ({:.0f}%)]\tloss={:.4f}".format(
-    #                 epoch,
-    #                 i,
-    #                 len(ds),
-    #                 100.0 * i / len(ds),
-    #                 loss.item(),
-    #             )
-    #         )
-
-    #     if n == 5:
-    #         break
-
-    #     n += 1
+        train_mes = monitor.end_window("training")
+        energy_measurements.append(train_mes.total_energy)
 
     print("measuring...")
     with nvtx.annotate("measured", color='blue'):
         energy_measurements = []
-        n = 0
-        for i, batch in enumerate(ds):
-            break
-            data = batch["input_ids"].to(model.device)
-            mask = batch["attention_mask"].to(model.device)
-
-            # with model.no_sync():
-            with nvtx.annotate(f"energy-{n}", color='red'):
+        
+        for i in range(n):
+            with nvtx.annotate(f"energy-{i}", color='red'):
                 monitor.begin_window("training")
-                loss = model(input_ids=data, attention_mask=mask, labels=data).loss
-                model.backward(loss)
-                model.step()
+
+                loss = model.train_batch()
+                if model.is_last_stage():
+                    print(f"loss: {loss}")
 
                 train_mes = monitor.end_window("training")
                 energy_measurements.append(train_mes.total_energy)
-
-            if i % (args.log_interval * batch_size) == 0:
-                print(
-                    "Train Epoch: {} [{}/{} ({:.0f}%)]\tloss={:.4f}".format(
-                        epoch,
-                        i,
-                        len(ds),
-                        100.0 * i / len(ds),
-                        loss.item(),
-                    )
-                )
-            
-            if n == 5:
-                break
-
-            n += 1
         
     local_rank = int(os.environ['LOCAL_RANK'])
     print(f"{local_rank}e{epoch}|> Avg energy consumption per step: {np.array(energy_measurements).mean(-1)}")
 
 def is_distributed():
     return dist.is_available() and dist.is_initialized()
+
+class ShittyWrapper(nn.Module):
+    def __init__(self, decoder_layer, rotary_emb):
+        super().__init__()
+        self.layer = decoder_layer
+        self.rotary_emb = rotary_emb
+
+    def forward(
+        self,
+        hidden_states,
+        attention_mask=None,
+        position_ids=None,
+        past_key_values=None,
+        use_cache=False,
+        cache_position=None,
+        **kwargs,
+    ):
+        position_ids = torch.arange(hidden_states.shape[1], device=hidden_states.device).unsqueeze(0)
+
+        return self.layer(
+            hidden_states,
+            attention_mask=attention_mask,
+            position_ids=position_ids,
+            past_key_values=past_key_values,
+            use_cache=use_cache,
+            cache_position=cache_position,
+            position_embeddings=self.rotary_emb(hidden_states, position_ids),
+            **kwargs,
+        )
+
+def dummy_loss_fn(outputs,labels):
+        # outputs is a CausalLMOutputWithPast for some reason
+        if hasattr(outputs, "logits"):
+            logits = outputs.logits
+        else:
+            logits = outputs
+        
+        return nn.CrossEntropyLoss()(logits.view(-1, logits.size(-1)), labels.view(-1))
 
 def main():
     # Training settings
@@ -209,18 +200,18 @@ def main():
     model = AutoModelForCausalLM.from_pretrained(model_name)
     print("loaded model and tokenizer")
 
-    def dummy_loss_fn(outputs,labels):
-        # outputs is a CausalLMOutputWithPast for some reason
-        if hasattr(outputs, "logits"):
-            logits = outputs.logits
-        else:
-            logits = outputs
-        
-        return nn.CrossEntropyLoss()(logits.view(-1, logits.size(-1)), labels.view(-1))
+    layers = []
+    target = model.model
+    rotary_emb = target.rotary_emb
+    layers.append(target.embed_tokens)
+    for layer in target.layers:
+        layers.append(ShittyWrapper(layer, rotary_emb))
+    layers.append(target.norm)
+    layers.append(model.lm_head)
 
     model = PipelineModule(
-        layers=[model],
-        num_stages=1,
+        layers=layers,
+        num_stages=2,
         loss_fn=dummy_loss_fn,
         partition_method="parameters",
     )
