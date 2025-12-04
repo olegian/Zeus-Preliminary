@@ -1,0 +1,116 @@
+NCOMMREPEATS = 42
+
+srun --gpus-per-node=1 uv run deepspeed test_qwen_ds_pp_dispatch.py
+0e1|> Avg energy consumption per step: 218.07379999756813
+
+srun --gpus-per-node=2 uv run deepspeed test_qwen_ds_pp_dispatch.py
+1e1|> Avg energy consumption per step: 189.041400000453
+[Rank 1] FINAL MEASUREMENTS for recv: 5 calls, total energy: 266.0100000053644
+[Rank 1] FINAL MEASUREMENTS for send: 5 calls, total energy: 26.947999984025955
+0e1|> Avg energy consumption per step: 170.06959999799727
+[Rank 0] FINAL MEASUREMENTS for send: 5 calls, total energy: 37.1710000038147
+[Rank 0] FINAL MEASUREMENTS for recv: 5 calls, total energy: 351.10099998116493
+
+srun --gpus-per-node=4 uv run deepspeed test_qwen_ds_pp_dispatch.py
+3e1|> Avg energy consumption per step: 135.65519999861718
+[Rank 3] FINAL MEASUREMENTS for recv: 5 calls, total energy: 388.7869999855757
+[Rank 3] FINAL MEASUREMENTS for send: 5 calls, total energy: 41.28600000590086
+[Rank 2] WRAPPED send
+[Rank 1] WRAPPED send
+0e1|> Avg energy consumption per step: 127.67400000095367
+[Rank 0] FINAL MEASUREMENTS for send: 5 calls, total energy: 16.91899999976158
+[Rank 0] FINAL MEASUREMENTS for recv: 5 calls, total energy: 572.8219999969006
+2e1|> Avg energy consumption per step: 157.73799999952317
+[Rank 2] FINAL MEASUREMENTS for recv: 10 calls, total energy: 238.3589999973774
+[Rank 2] FINAL MEASUREMENTS for send: 10 calls, total energy: 82.88100000470877
+1e1|> Avg energy consumption per step: 161.29220000207425
+[Rank 1] FINAL MEASUREMENTS for recv: 10 calls, total energy: 365.1800000220537
+[Rank 1] FINAL MEASUREMENTS for send: 10 calls, total energy: 97.25499999523163
+
+srun --gpus-per-node=8 uv run deepspeed test_qwen_ds_pp_dispatch.py
+7e1|> Avg energy consumption per step: 217.1725999996066
+[Rank 7] FINAL MEASUREMENTS for recv: 5 calls, total energy: 840.9919999986887
+[Rank 7] FINAL MEASUREMENTS for send: 5 calls, total energy: 54.730000004172325
+[Rank 6] WRAPPED send
+[Rank 5] WRAPPED send
+[Rank 4] WRAPPED send
+[Rank 3] WRAPPED send
+[Rank 2] WRAPPED send
+[Rank 1] WRAPPED send
+0e1|> Avg energy consumption per step: 228.51660000085832
+[Rank 0] FINAL MEASUREMENTS for send: 5 calls, total energy: 41.951999962329865
+[Rank 0] FINAL MEASUREMENTS for recv: 5 calls, total energy: 1089.5780000388622
+1e1|> Avg energy consumption per step: 237.2717999994755
+[Rank 1] FINAL MEASUREMENTS for recv: 10 calls, total energy: 905.0980000048876
+[Rank 1] FINAL MEASUREMENTS for send: 10 calls, total energy: 100.87800002098083
+4e1|> Avg energy consumption per step: 201.7496000006795
+[Rank 4] FINAL MEASUREMENTS for recv: 10 calls, total energy: 571.9489999935031
+[Rank 4] FINAL MEASUREMENTS for send: 10 calls, total energy: 80.46100000292063
+6e1|> Avg energy consumption per step: 216.56880000084638
+[Rank 6] FINAL MEASUREMENTS for recv: 10 calls, total energy: 472.28799998760223
+[Rank 6] FINAL MEASUREMENTS for send: 10 calls, total energy: 74.83400000631809
+5e1|> Avg energy consumption per step: 256.7203999996185
+[Rank 5] FINAL MEASUREMENTS for recv: 10 calls, total energy: 630.8649999797344
+[Rank 5] FINAL MEASUREMENTS for send: 10 calls, total energy: 127.21899998188019
+3e1|> Avg energy consumption per step: 216.36759999990463
+[Rank 3] FINAL MEASUREMENTS for recv: 10 calls, total energy: 667.25
+[Rank 3] FINAL MEASUREMENTS for send: 10 calls, total energy: 60.019999995827675
+2e1|> Avg energy consumption per step: 226.06459999978543
+[Rank 2] FINAL MEASUREMENTS for recv: 10 calls, total energy: 774.8000000044703
+[Rank 2] FINAL MEASUREMENTS for send: 10 calls, total energy: 109.29500000178814
+
+
+NCOMMREPEATS = 1
+
+srun --gpus-per-node=1 uv run deepspeed test_qwen_ds_pp_dispatch.py
+0e1|> Avg energy consumption per step: 213.4014000058174
+
+srun --gpus-per-node=2 uv run deepspeed test_qwen_ds_pp_dispatch.py
+1e1|> Avg energy consumption per step: 219.0634000003338
+[Rank 1] FINAL MEASUREMENTS for recv: 5 calls, total energy: 342.6939999908209
+[Rank 1] FINAL MEASUREMENTS for send: 5 calls, total energy: 0.0
+0e1|> Avg energy consumption per step: 213.1865999996662
+[Rank 0] FINAL MEASUREMENTS for send: 5 calls, total energy: 0.0
+[Rank 0] FINAL MEASUREMENTS for recv: 5 calls, total energy: 635.6240000128746
+
+srun --gpus-per-node=4 uv run deepspeed test_qwen_ds_pp_dispatch.py
+
+3e1|> Avg energy consumption per step: 123.73719999939203
+[Rank 3] FINAL MEASUREMENTS for recv: 5 calls, total energy: 346.1789999976754
+[Rank 3] FINAL MEASUREMENTS for send: 5 calls, total energy: 0.0
+[Rank 1] WRAPPED send
+0e1|> Avg energy consumption per step: 110.62239999771118
+[Rank 0] FINAL MEASUREMENTS for send: 5 calls, total energy: 0.0
+[Rank 0] FINAL MEASUREMENTS for recv: 5 calls, total energy: 471.35199996829033
+1e1|> Avg energy consumption per step: 140.50200000107287
+[Rank 1] FINAL MEASUREMENTS for recv: 10 calls, total energy: 343.8800000101328
+[Rank 1] FINAL MEASUREMENTS for send: 10 calls, total energy: 0.0
+2e1|> Avg energy consumption per step: 138.7973999992013
+[Rank 2] FINAL MEASUREMENTS for recv: 10 calls, total energy: 219.597999997437
+[Rank 2] FINAL MEASUREMENTS for send: 10 calls, total energy: 0.0
+
+srun --gpus-per-node=8 uv run deepspeed test_qwen_ds_pp_dispatch.py
+7e1|> Avg energy consumption per step: 187.60020000040532
+[Rank 7] FINAL MEASUREMENTS for recv: 5 calls, total energy: 699.7069999948144
+[Rank 7] FINAL MEASUREMENTS for send: 5 calls, total energy: 0.0
+0e1|> Avg energy consumption per step: 178.89980000257492
+[Rank 0] FINAL MEASUREMENTS for send: 5 calls, total energy: 8.176999986171722
+[Rank 0] FINAL MEASUREMENTS for recv: 5 calls, total energy: 858.1229999959469
+4e1|> Avg energy consumption per step: 166.5521999999881
+[Rank 4] FINAL MEASUREMENTS for recv: 10 calls, total energy: 436.54200000315905
+[Rank 4] FINAL MEASUREMENTS for send: 10 calls, total energy: 23.608999997377396
+3e1|> Avg energy consumption per step: 171.94619999974967
+[Rank 3] FINAL MEASUREMENTS for recv: 10 calls, total energy: 526.8419999927282
+[Rank 3] FINAL MEASUREMENTS for send: 10 calls, total energy: 34.29799999296665
+2e1|> Avg energy consumption per step: 183.836400000751
+[Rank 2] FINAL MEASUREMENTS for recv: 10 calls, total energy: 635.679999999702
+[Rank 2] FINAL MEASUREMENTS for send: 10 calls, total energy: 0.0
+1e1|> Avg energy consumption per step: 186.8447999984026
+[Rank 1] FINAL MEASUREMENTS for recv: 10 calls, total energy: 713.7059999853373
+[Rank 1] FINAL MEASUREMENTS for send: 10 calls, total energy: 16.94699999690056
+6e1|> Avg energy consumption per step: 175.1475999996066
+[Rank 6] FINAL MEASUREMENTS for recv: 10 calls, total energy: 352.43000000715256
+[Rank 6] FINAL MEASUREMENTS for send: 10 calls, total energy: 14.08500000089407
+5e1|> Avg energy consumption per step: 208.48540000021458
+[Rank 5] FINAL MEASUREMENTS for recv: 10 calls, total energy: 524.4130000025034
+[Rank 5] FINAL MEASUREMENTS for send: 10 calls, total energy: 0.0

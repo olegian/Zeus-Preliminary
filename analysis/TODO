@@ -1,0 +1,8 @@
+Graphs:
+1. Energy consumption per step on one device?
+2. Energy consumption per step per device DP (split between comp and comm)
+4. Energy consumption per step per device PP (split between comp and comm)
+
+
+Done:
+3. Energy consumption per step per device TP (split between comp and comm)
