@@ -24,9 +24,9 @@ N_COMM_REPEATS = 42
 
 # WORLD_SIZE = int(os.environ.get("WORLD_SIZE", 2))
 
-# TO RUN: srun --gpus-per-node=2 uv run deepspeed test_qwen_ds.py
+# TO RUN: srun --gpus-per-node=2 uv run deepspeed test_qwen_ds_pp_dispatch.py
 
-# TO RUN: srun --gpus-per-node=2 uv run nsys profile -o qwen_ds_2 deepspeed test_qwen_ds.py
+# TO RUN: srun --gpus-per-node=2 uv run nsys profile -o qwen_ds_pp deepspeed test_qwen_ds_pp_dispatch.py
 
 # def wrap_all():
 #     functions = [
@@ -277,12 +277,16 @@ def main():
     layers.append(target.norm)
     layers.append(model.lm_head)
 
+    world_size = dist.get_world_size()
+
     model = PipelineModule(
         layers=layers,
-        num_stages=1,
+        num_stages=world_size if world_size > 0 else 1,
         loss_fn=dummy_loss_fn,
         partition_method="parameters",
     )
+
+    print(f"PP = {world_size if world_size > 0 else 1} stages")
 
     # need simple text dataset instead of image dataset for language model
 
