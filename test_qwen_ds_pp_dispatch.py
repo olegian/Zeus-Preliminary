@@ -20,7 +20,7 @@ from zeus.monitor import ZeusMonitor
 from zeus.utils.lr_scaler import LinearScaler
 from zeus.device import get_gpus
 
-N_COMM_REPEATS = 42
+N_COMM_REPEATS = 1
 
 # WORLD_SIZE = int(os.environ.get("WORLD_SIZE", 2))
 
