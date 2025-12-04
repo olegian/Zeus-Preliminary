@@ -52,6 +52,9 @@ class FunctionalCollectiveHookManager:
             'reduce_scatter_tensor',
             'all_gather_into_tensor',
             'reduce_scatter_tensor',
+            'recv',
+            'irecv',
+            'send'
         ]
         
         print(f"Installing hooks on functional collectives...")
@@ -151,7 +154,7 @@ def train(args, model, device, ds, optimizer: optim.Optimizer, epoch, batch_size
     def pre_comm_hook(op_name, *args, **kwargs):
         pass
         # rank = dist.get_rank()
-        # # print(f"[Rank {rank}] → PRE {op_name}")
+        # print(f"[Rank {rank}] → PRE {op_name}")
         # monitor.begin_window("nccl_comm")
     
     def post_comm_hook(op_name, result):

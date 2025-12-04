@@ -20,7 +20,7 @@ from zeus.monitor import ZeusMonitor
 from zeus.utils.lr_scaler import LinearScaler
 from zeus.device import get_gpus
 
-N_COMM_REPEATS = 1
+N_COMM_REPEATS = 42
 
 # WORLD_SIZE = int(os.environ.get("WORLD_SIZE", 2))
 
@@ -28,67 +28,35 @@ N_COMM_REPEATS = 1
 
 # TO RUN: srun --gpus-per-node=2 uv run nsys profile -o qwen_ds_2 deepspeed test_qwen_ds.py
 
-# Hook into functional collectives instead!
-# try:
-#     # import  as funcol
-#     dist.send()
-#     HAS_FUNCOL = True
-# except ImportError:
-#     HAS_FUNCOL = False
-#     print("Warning: functional collectives not available")
-# Create closure
-def make_wrapper(func, before_hook, after_hook):
-    @functools.wraps(func)
-    def wrapped(*args, **kwargs):
-        rank = dist.get_rank() if dist.is_initialized() else -1
+# def wrap_all():
+#     functions = [
+#         dist.recv,
+#         dist.irecv,
+#         dist.send]
+#     for func in functions:
+#         func_name = func.__name__
+#         orig = func
+#         def wrapped(*args, **kwargs):
+#             print(f"[Rank {dist.get_rank()}] WRAPPED {func_name}")
+#             ret = orig(*args, **kwargs)
+#             torch.cuda.synchronize()
+#             return ret
+#         func = wrapped
+# orig = dist.recv
+# def wrapped_recv(*args, **kwargs):
+#     print(f"[Rank {dist.get_rank()}] WRAPPED recv")
+#     ret = orig(*args, **kwargs)
+#     torch.cuda.synchronize()
+#     return ret
+# dist.recv = wrapped_recv
 
-        # Clone the input tensor(s) for measurement
-        # cause you cant have it accumulate every time
-        # cloned_args = []
-        # for arg in args:
-        #     if isinstance(arg, torch.Tensor):
-        #         cloned_args.append(arg.clone().detach())
-        #     else:
-        #         cloned_args.append(arg)
-        
-        before_hook(func, *args, **kwargs)
-        result = func(*args, **kwargs)
-        if hasattr(result, 'wait'):
-            result.wait()
-        # for i in range(N_COMM_REPEATS - 1):
-        #     res = orig(*cloned_args, **kwargs)
-        #     if hasattr(result, 'wait'):
-        #         res.wait() # force syncronous
-        torch.cuda.synchronize()
-        after_hook(func, result)
-        
-        return result
-    return wrapped
-
-class FunctionalCollectiveHookManager:
-    """Hooks into functional collectives used by DTensor/TP"""
-    
-    def __init__(self, before_hook=None, after_hook=None):
-        self.before_hook = before_hook or (lambda op, *args, **kwargs: None)
-        self.after_hook = after_hook or (lambda op, result: None)
-    
-    def install(self):
-        """Install hooks on functional collective operations"""
-
-        collective_functions = [
-            dist.send,
-            dist.all_gather,
-            dist.reduce_scatter_tensor,
-            dist.all_gather_into_tensor, 
-            dist.irecv, dist.recv, dist.all_reduce, dist.broadcast
-        ]
-        
-        print(f"Installing hooks on functional collectives...")
-        for func in collective_functions:
-            wrapped = make_wrapper(func, self.before_hook, self.after_hook)
-            setattr(func, func.__name__, wrapped)
-        
-        print("Functional collective hooks installed successfully")
+# orig_ = dist.send
+# def wrapped_send(*args, **kwargs):
+#     print(f"[Rank {dist.get_rank()}] WRAPPED send")
+#     ret = orig_(*args, **kwargs)
+#     torch.cuda.synchronize()
+#     return ret
+# dist.send = wrapped_send
 
 def train(args, model: deepspeed.PipelineEngine, ds, optimizer: optim.Optimizer, epoch, batch_size, monitor: ZeusMonitor):
     model.train()
@@ -106,28 +74,36 @@ def train(args, model: deepspeed.PipelineEngine, ds, optimizer: optim.Optimizer,
         train_mes = monitor.end_window("training")
         energy_measurements.append(train_mes.total_energy)
 
-    # INSTALL HOOKS on functional collectives
-    measurements = []
-    def pre_comm_hook(op_name, *args, **kwargs):
-        # pass
-        rank = dist.get_rank()
-        print(f"[Rank {rank}] → PRE {op_name}")
-        monitor.begin_window("nccl_comm")
-    
-    def post_comm_hook(op_name, result):
-        print(f"[Rank {dist.get_rank()}] ← POST {op_name}")
-        # pass
-        rank = dist.get_rank()
-        res = monitor.end_window('nccl_comm')
-        measurements.append(res.total_energy / N_COMM_REPEATS)
+    measurements = {}
+    def wrapped_closure(func):
+        def wrapped(*args, **kwargs):
+            print(f"[Rank {dist.get_rank()}] WRAPPED {func.__name__}")
+            # cloned_args = []
+            # for arg in args:
+            #     if isinstance(arg, torch.Tensor):
+            #         cloned_args.append(arg.clone().detach())
+            #     else:
+            #         cloned_args.append(arg)
 
-    hooks = FunctionalCollectiveHookManager(
-        before_hook=pre_comm_hook,
-        after_hook=post_comm_hook,
-    )
-    hooks.install()
+            monitor.begin_window(f"{func.__name__}")
+            for i in range(N_COMM_REPEATS):
+                ret = func(*args, **kwargs)
+                # if hasattr(func, 'wait'):
+                #     ret.wait() # force s
+            # ret = func(*args, **kwargs)
+            torch.cuda.synchronize()
+            res = monitor.end_window(f"{func.__name__}")
+            if func.__name__ not in measurements:
+                measurements[func.__name__] = []
+            measurements[func.__name__].append(res.total_energy)
+            return ret
+        return wrapped
 
-    dist.send(torch.zeros(1).to("cuda"), dst=(dist.get_rank() + 1) % dist.get_world_size())
+    functions = [dist.recv, dist.send]
+
+    for func in functions:
+        wrapped_ = wrapped_closure(func)
+        setattr(dist, func.__name__, wrapped_)
 
     print("measuring...")
     with nvtx.annotate("measured", color='blue'):
@@ -146,6 +122,10 @@ def train(args, model: deepspeed.PipelineEngine, ds, optimizer: optim.Optimizer,
         
     local_rank = int(os.environ['LOCAL_RANK'])
     print(f"{local_rank}e{epoch}|> Avg energy consumption per step: {np.array(energy_measurements).mean(-1)}")
+    # print(f"[Rank {local_rank}] FINAL MEASUREMENTS: {len(measurements)} calls, total energy: {sum(measurements)}J")
+    for key in measurements:
+        vals = measurements[key]
+        print(f"[Rank {local_rank}] FINAL MEASUREMENTS for {key}: {len(vals)} calls, total energy: {sum(vals)}")
 
 def is_distributed():
     return dist.is_available() and dist.is_initialized()
@@ -299,7 +279,7 @@ def main():
 
     model = PipelineModule(
         layers=layers,
-        num_stages=2,
+        num_stages=1,
         loss_fn=dummy_loss_fn,
         partition_method="parameters",
     )
