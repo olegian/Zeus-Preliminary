@@ -1,0 +1,24 @@
+# No Communication!
+
+srun --gpus-per-node=1 uv run deepspeed test_qwen_ds_pp.py
+0e1|> Avg energy consumption per step: 217.879599994421
+
+srun --gpus-per-node=2 uv run deepspeed test_qwen_ds_pp.py
+1e1|> Avg energy consumption per step: 171.4333999991417
+0e1|> Avg energy consumption per step: 153.5128000020981
+
+srun --gpus-per-node=4 uv run deepspeed test_qwen_ds_pp.py
+3e1|> Avg energy consumption per step: 112.90279999971389
+0e1|> Avg energy consumption per step: 104.35800000429154
+1e1|> Avg energy consumption per step: 135.8530000001192
+2e1|> Avg energy consumption per step: 134.38879999965428
+
+srun --gpus-per-node=8 uv run deepspeed test_qwen_ds_pp.py
+7e1|> Avg energy consumption per step: 118.63340000000316
+0e1|> Avg energy consumption per step: 89.54360000006855
+1e1|> Avg energy consumption per step: 114.099599999981
+2e1|> Avg energy consumption per step: 112.99980000006035
+6e1|> Avg energy consumption per step: 110.74599999999627
+5e1|> Avg energy consumption per step: 106.41419999999925
+4e1|> Avg energy consumption per step: 115.48240000000223
+3e1|> Avg energy consumption per step: 109.85499999998137
